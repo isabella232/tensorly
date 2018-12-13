@@ -88,7 +88,6 @@ def initialize_factors(tensor, rank, init='svd', svd='numpy_svd', random_state=N
             return [tl.abs(f) for f in factors]
         else:
             return factors
-
     elif init == 'svd':
         try:
             svd_fun = tl.SVD_FUNS[svd]
@@ -171,20 +170,49 @@ def parafac(tensor, rank, n_iter_max=100, init='svd', svd='numpy_svd', tol=1e-8,
         if orthogonalise and iteration <= orthogonalise:
             factor = [tl.qr(factor)[0] for factor in factors]
 
+        if verbose:
+            print("Starting iteration", iteration)
         for mode in range(tl.ndim(tensor)):
+            if verbose:
+                print("Mode", mode, "of", tl.ndim(tensor))
             pseudo_inverse = tl.tensor(np.ones((rank, rank)), **tl.context(tensor))
             for i, factor in enumerate(factors):
                 if i != mode:
                     pseudo_inverse = pseudo_inverse*tl.dot(tl.transpose(factor), factor)
-            factor = tl.dot(unfold(tensor, mode), khatri_rao(factors, skip_matrix=mode))
-            factor = tl.transpose(tl.solve(tl.transpose(pseudo_inverse), tl.transpose(factor)))
+
+            # The below is equivalent to (but more efficient than)
+
+            # unfolded = unfold(tensor, mode)
+            # kr_factors = khatri_rao(factors, skip_matrix=mode)
+            # factor = tl.dot(unfolded, kr_factors)
+
+            mttkrp_parts = []
+            for r in range(rank):
+                if verbose:
+                    print(" Rank", r, "of", rank)
+                partial_factor = tl.transpose(tl.moveaxis(tensor, mode, -1))
+                for i, f in enumerate(factors):
+                    if i == mode:
+                        continue
+                    partial_factor = tl.dot(partial_factor, tl.reshape(f[:,r], (f[:,r].shape[0], 1)))
+                    partial_factor = tl.reshape(partial_factor, partial_factor.shape[:-1])
+                mttkrp_parts.append(partial_factor)
+            mttkrp = tl.stack(mttkrp_parts, axis=1)
+            factor = tl.transpose(tl.solve(tl.transpose(pseudo_inverse), tl.transpose(mttkrp)))
             factors[mode] = factor
 
         if tol:
-            rec_error = tl.norm(tensor - kruskal_to_tensor(factors), 2) / norm_tensor
+            # This is ||kruskal_to_tensor(factors)||^2
+            factors_norm = tl.sum(tl.prod(tl.stack([tl.dot(tl.transpose(f), f) for f in factors], 0), 0))
+            # mttkrp and factor for the last mode. This is equivalent to the
+            # inner product <tensor, factorization>
+            iprod = tl.sum(mttkrp*factor)
+            # Subtract iprod from each term to avoid loss of significance
+            rec_error = tl.sqrt(tl.abs((norm_tensor**2 - iprod) + (factors_norm - iprod))) / norm_tensor
             rec_errors.append(rec_error)
 
-            if iteration > 1:
+
+            if iteration >= 1:
                 if verbose:
                     print('reconstruction error={}, variation={}.'.format(
                         rec_errors[-1], rec_errors[-2] - rec_errors[-1]))
@@ -193,7 +221,11 @@ def parafac(tensor, rank, n_iter_max=100, init='svd', svd='numpy_svd', tol=1e-8,
                     if verbose:
                         print('converged in {} iterations.'.format(iteration))
                     break
-                    
+            else:
+                if verbose:
+                    print('reconstruction error={}'.format(rec_errors[-1]))
+
+
     if return_errors:
         return factors, rec_errors
     else:
@@ -276,7 +308,7 @@ def non_negative_parafac(tensor, rank, n_iter_max=100, init='svd', svd='numpy_sv
 
 
 
-def sample_khatri_rao(matrices, n_samples, skip_matrix=None, 
+def sample_khatri_rao(matrices, n_samples, skip_matrix=None,
                       return_sampled_rows=False, random_state=None):
     """Random subsample of the Khatri-Rao product of the given list of matrices
 
@@ -289,17 +321,17 @@ def sample_khatri_rao(matrices, n_samples, skip_matrix=None,
 
             for i in len(matrices):
                 matrices[i].shape = (n_i, m)
-                
+
     n_samples : int
         number of samples to be taken from the Khatri-Rao product
 
     skip_matrix : None or int, optional, default is None
         if not None, index of a matrix to skip
-        
-    random_state : None, int or numpy.random.RandomState 
+
+    random_state : None, int or numpy.random.RandomState
         if int, used to set the seed of the random number generator
         if numpy.random.RandomState, used to generate random_samples
-    
+
     returned_sampled_rows : bool, default is False
         if True, also returns a list of the rows sampled from the full
         khatri-rao product
@@ -308,10 +340,10 @@ def sample_khatri_rao(matrices, n_samples, skip_matrix=None,
     -------
     sampled_Khatri_Rao : ndarray
         The sampled matricised tensor Khatri-Rao with `n_samples` rows
-        
+
     indices : tuple list
         a list of indices sampled for each mode
-    
+
     indices_kr : int list
         list of length `n_samples` containing the sampled row indices
     """
@@ -325,7 +357,7 @@ def sample_khatri_rao(matrices, n_samples, skip_matrix=None,
 
     if skip_matrix is not None:
         matrices = [matrices[i] for i in range(len(matrices)) if i != skip_matrix]
-     
+
     n_factors = len(matrices)
     rank = tl.shape(matrices[0])[1]
     sizes = [tl.shape(m)[0] for m in matrices]
@@ -337,12 +369,12 @@ def sample_khatri_rao(matrices, n_samples, skip_matrix=None,
         indices_kr = np.zeros((n_samples), dtype=int)
         for size, indices in zip(sizes, indices_list):
             indices_kr = indices_kr*size + indices
-    
+
     # Compute the Khatri-Rao product for the chosen indices
     sampled_kr = tl.ones((n_samples, rank), **tl.context(matrices[0]))
     for indices, matrix in zip(indices_list, matrices):
         sampled_kr = sampled_kr*matrix[indices, :]
-        
+
     if return_sampled_rows:
         return sampled_kr, indices_list, indices_kr
     else:
@@ -404,20 +436,20 @@ def randomised_parafac(tensor, rank, n_samples, n_iter_max=100, init='random', s
             if mode:
                 sampled_unfolding = tensor[indices_list]
             else:
-                sampled_unfolding = tl.transpose(tensor[indices_list]) 
-                
+                sampled_unfolding = tl.transpose(tensor[indices_list])
+
             pseudo_inverse = tl.dot(tl.transpose(kr_prod), kr_prod)
             factor = tl.dot(tl.transpose(kr_prod), sampled_unfolding)
             factor = tl.transpose(tl.solve(pseudo_inverse, factor))
             factors[mode] = factor
-            
+
         if max_stagnation or tol:
             rec_error = tl.norm(tensor - kruskal_to_tensor(factors), 2) / norm_tensor
             if not min_error or rec_error < min_error:
                 min_error = rec_error
                 stagnation = -1
             stagnation += 1
-                    
+
             rec_errors.append(rec_error)
 
             if iteration > 1:
