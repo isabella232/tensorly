@@ -1,5 +1,3 @@
-from ...decomposition import tucker, partial_tucker, non_negative_tucker,
-=======
 from ...decomposition import (tucker, partial_tucker, non_negative_tucker,
                               robust_pca, parafac, non_negative_parafac)
 from .core import wrap
