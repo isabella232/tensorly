@@ -42,6 +42,7 @@ def kruskal_to_tensor(factors, weights=None, mask=None):
     summing over r and updating an outer product of vectors.
 
     """
+    from .tenalg import khatri_rao
     shape = [T.shape(factor)[0] for factor in factors]
     if weights is not None:
         factors[0] = factors[0]*weights
